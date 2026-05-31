@@ -47,7 +47,7 @@ function cleanText(value) {
 }
 
 /* ─── Kenapa Entry ────────────────────────────────────────────────────────── */
-function buildEntryRationale({ token, report, runner, grade, side, reasons }) {
+function buildEntryRationale({ token, report, runner, grade, side, reasons, narrative = null }) {
   const flags = token.flags || {};
   const m5 = Number(token.priceChange?.m5 ?? token.m5 ?? 0);
   const h1 = Number(token.priceChange?.h1 ?? token.h1 ?? 0);
@@ -77,6 +77,12 @@ function buildEntryRationale({ token, report, runner, grade, side, reasons }) {
   if (report.volumeIntegrity != null) {
     points.push(`Integritas volume ${report.volumeIntegrity}% (keyakinan data live ${report.confidence}%).`);
   }
+
+  // Tambahkan narrative signals
+  if (narrative && narrative.signals && narrative.signals.length > 0) {
+    narrative.signals.forEach(sig => points.push(`Narasi: ${sig}`));
+  }
+
   (reasons || []).forEach((reason) => {
     const clean = cleanText(reason);
     if (clean && !points.includes(clean)) points.push(clean);
@@ -204,7 +210,7 @@ function buildProviders({ token, report }) {
  * Susun seluruh narasi sinyal dari output engine.
  * @returns objek terstruktur untuk dikonsumsi SignalDetail.
  */
-export function buildSignalExplain({ token, report, rug, runner, grade, side, reasons, entry, sl, tp, tpPct, slPct, rr }) {
+export function buildSignalExplain({ token, report, rug, runner, grade, side, reasons, entry, sl, tp, tpPct, slPct, rr, narrative = null }) {
   return {
     verdict: report.verdict,
     summary: cleanText(report.summary),
@@ -212,7 +218,7 @@ export function buildSignalExplain({ token, report, rug, runner, grade, side, re
     confidence: report.confidence,
     volumeIntegrity: report.volumeIntegrity,
 
-    entryRationale: buildEntryRationale({ token, report, runner, grade, side, reasons }),
+    entryRationale: buildEntryRationale({ token, report, runner, grade, side, reasons, narrative }),
     slTpRationale: buildSlTpRationale({ entry, sl, tp, tpPct, slPct, rr }),
     volumeFees: buildVolumeFees({ token, report }),
     riskNarrative: buildRiskNarrative({ report, rug }),
@@ -223,6 +229,14 @@ export function buildSignalExplain({ token, report, rug, runner, grade, side, re
       signals: runner?.signals || []
     },
     providers: buildProviders({ token, report }),
+    narrative: narrative ? {
+      themes: narrative.themes || [],
+      isHotMeta: narrative.isHotMeta || false,
+      isSaturated: narrative.isSaturated || false,
+      isFirstMover: narrative.isFirstMover || false,
+      narrativeScore: narrative.narrativeScore || 0,
+      signals: narrative.signals || []
+    } : null,
 
     // pass-through dari engine (nama backend disaring agar UI bersih)
     checks: (report.checks || []).map((c) => ({ ...c, detail: cleanText(c.detail) })),

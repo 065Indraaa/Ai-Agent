@@ -126,7 +126,45 @@ export default function SignalDetail({ signal, trade, onClose }) {
             <div className="sd-levelbox"><span>PnL Berjalan</span><strong className={livePnl == null ? 'text-muted' : livePnl >= 0 ? 'text-green' : 'text-red'}>{livePnl == null ? '—' : `${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}%`}</strong></div>
             <div className="sd-levelbox"><span>Status</span><strong style={{ color: trade?.status === 'WIN' ? 'var(--green)' : trade?.status === 'LOSS' ? 'var(--red)' : trade?.status === 'ACTIVE' ? 'var(--cyan)' : 'var(--muted)' }}>{trade?.status || (signal.tracked ? 'SIAP' : 'PENDING')}</strong></div>
           </div>
+          {trade && (
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, fontSize: 12, color: 'var(--muted)' }}>
+              <span>Posisi tersisa: <strong>{((trade.positionRemaining ?? 1.0) * 100).toFixed(0)}%</strong></span>
+              {trade.realizedPnl != null && trade.realizedPnl !== 0 && (
+                <span>· Realized PnL: <strong className={trade.realizedPnl >= 0 ? 'text-green' : 'text-red'}>{trade.realizedPnl >= 0 ? '+' : ''}{trade.realizedPnl.toFixed(2)}%</strong></span>
+              )}
+              {trade.peakPrice && trade.peakPrice > entry && (
+                <span>· Peak: <strong className="text-cyan">{formatUsd(trade.peakPrice)}</strong> (+{(((trade.peakPrice - entry) / entry) * 100).toFixed(1)}%)</span>
+              )}
+            </div>
+          )}
           {ex.slTpRationale?.text && <p className="sd-text">{ex.slTpRationale.text}</p>}
+          {trade?.exitReason && (
+            <p className="sd-text" style={{ marginTop: 8, padding: 8, background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 13 }}>
+              <strong>Exit reason:</strong> {trade.exitReason}
+            </p>
+          )}
+          {trade?.exitEvents && trade.exitEvents.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <strong style={{ fontSize: 13, color: 'var(--soft)' }}>Exit Events:</strong>
+              <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {trade.exitEvents.map((evt, i) => (
+                  <div key={i} style={{ fontSize: 12, padding: 6, background: 'var(--bg-secondary)', borderRadius: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--muted)' }}>
+                      {evt.type === 'PARTIAL_EXIT' && `${evt.tier}: exit ${(evt.size * 100).toFixed(0)}% @ ${formatUsd(evt.price)}`}
+                      {evt.type === 'FULL_EXIT' && `Full exit ${(evt.size * 100).toFixed(0)}% @ ${formatUsd(evt.price)}`}
+                      {evt.type === 'MOVE_STOP' && `SL → ${formatUsd(evt.newStop)}`}
+                      {evt.type === 'TRAIL_STOP' && `Trail ${evt.trailPct}% → ${formatUsd(evt.newStop)}`}
+                    </span>
+                    {evt.pnlPct != null && (
+                      <strong className={evt.pnlPct >= 0 ? 'text-green' : 'text-red'} style={{ fontSize: 12 }}>
+                        {evt.pnlPct >= 0 ? '+' : ''}{evt.pnlPct.toFixed(1)}%
+                      </strong>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Section>
 
         {/* Kenapa Entry */}

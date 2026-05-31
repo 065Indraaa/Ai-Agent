@@ -1,8 +1,10 @@
 import { getSnapshots, getVelocity, getFirst } from './snapshotStore';
+import { getCachedBaseline, getRunnerMaxAge } from './marketRegime';
 
-export function analyzeRunner(token) {
+export function analyzeRunner(token, regimeBaseline = null) {
   if (!token?.ca) return emptyResult();
 
+  const baseline = regimeBaseline || getCachedBaseline();
   const snapshots = getSnapshots(token.ca);
   const flags = token.flags || {};
   const priceChange = token.priceChange || {};
@@ -21,20 +23,27 @@ export function analyzeRunner(token) {
   const h1 = Number(priceChange.h1 || 0);
 
   // Hard exclusions — token tidak boleh jadi runner kalau kondisi ini terjadi
+  // Liquidity threshold sekarang RELATIF terhadap baseline (p50 = median market)
+  const minLiquidity = isBondingCurve ? 0 : baseline.liquidityUsd.p50 * 0.5; // 50% dari median
   if (isBondingCurve) {
     if (txns5m < 6) return emptyResult();
-  } else if (liquidityUsd < 8000) {
+  } else if (liquidityUsd < minLiquidity) {
     return emptyResult();
   }
   if (h1 < -10) return emptyResult();
   if (m5 < -5) return emptyResult();
   if (sells5m > buys5m * 1.6) return emptyResult();
-  if (volumeRatio > 6) return emptyResult();
 
+  // Volume ratio threshold juga relatif
+  const maxVolRatio = baseline.volumeLiquidityRatio.p75 * 1.5; // 1.5x dari p75
+  if (volumeRatio > maxVolRatio) return emptyResult();
+
+  // Age threshold sekarang phase-aware dan lebih ketat
   const ageMinutes = token.ageMinutes
     || (token.pairCreatedAt ? Math.floor((Date.now() - token.pairCreatedAt) / 60000) : null);
   if (ageMinutes != null) {
-    if (ageMinutes > 6 * 60) return emptyResult();
+    const maxAge = getRunnerMaxAge(token.phase);
+    if (ageMinutes > maxAge) return emptyResult();
   }
 
   let score = 0;

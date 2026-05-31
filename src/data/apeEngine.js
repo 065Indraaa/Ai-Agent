@@ -1,4 +1,5 @@
 import { analysisLayers, ponyinPrinciples } from './knowledgeBase';
+import { getCachedBaseline } from './marketRegime';
 
 export const emptyToken = {
   id: 'empty',
@@ -45,21 +46,22 @@ export const emptyToken = {
   feedInsight: 'Masukin contract address buat ambil data DexScreener, Solana RPC, sama PumpPortal stream.'
 };
 
-export function analyzeToken(token = emptyToken) {
+export function analyzeToken(token = emptyToken, regimeBaseline = null) {
   const target = token || emptyToken;
+  const baseline = regimeBaseline || getCachedBaseline();
   const flags = { ...emptyToken.flags, ...(target.flags || {}) };
   const feeHealth = computeFeeHealth(flags);
-  const volumeIntegrity = computeVolumeIntegrity(flags, feeHealth);
+  const volumeIntegrity = computeVolumeIntegrity(flags, feeHealth, baseline);
   const confidence = computeConfidence(target, flags);
 
   let score = 58;
 
   score += scoreAuthority(flags);
-  score += scoreHolders(flags, target.phase);
-  score += scoreVolume(flags, volumeIntegrity);
+  score += scoreHolders(flags, target.phase, baseline);
+  score += scoreVolume(flags, volumeIntegrity, baseline);
   score += scoreMarketing(flags);
   score += scoreCandle(flags);
-  score += scoreLiquidity(target, flags);
+  score += scoreLiquidity(target, flags, baseline);
   score += scoreUnknowns(flags, target);
   score += scoreExternalSignals(flags);
 
@@ -104,7 +106,7 @@ function scoreAuthority(flags) {
   return score;
 }
 
-function scoreHolders(flags, phase) {
+function scoreHolders(flags, phase, baseline) {
   let score = 0;
   const top10Pct = typeof flags.top10Pct === 'number' ? flags.top10Pct : null;
   const uniqueOwnerCount = typeof flags.uniqueOwnerCount === 'number' ? flags.uniqueOwnerCount : null;
@@ -115,6 +117,7 @@ function scoreHolders(flags, phase) {
   const hasKol = Boolean(flags.kolDetected);
 
   if (typeof flags.top10Pct === 'number') {
+    // Threshold sekarang relatif: fresh masih 68, tapi migrated pakai baseline
     const riskyThreshold = phase === 'fresh' ? 68 : 55;
     if (top10Pct > riskyThreshold) score -= 22;
     else if (top10Pct > 40) score -= 11;
@@ -161,14 +164,16 @@ function scoreHolders(flags, phase) {
   return score;
 }
 
-function scoreVolume(flags, volumeIntegrity) {
+function scoreVolume(flags, volumeIntegrity, baseline) {
   let score = 0;
   if (volumeIntegrity < 25) score -= 22;
   else if (volumeIntegrity < 50) score -= 10;
   else if (volumeIntegrity > 72) score += 8;
 
-  if (flags.volumeLiquidityRatio > 5) score -= 10;
-  if (flags.txns5m > 160 && flags.volumeLiquidityRatio > 2.5) score -= 8;
+  // Volume/liquidity ratio threshold sekarang relatif terhadap baseline p75
+  const maxRatio = baseline.volumeLiquidityRatio.p75 * 1.2;
+  if (flags.volumeLiquidityRatio > maxRatio) score -= 10;
+  if (flags.txns5m > 160 && flags.volumeLiquidityRatio > baseline.volumeLiquidityRatio.p60) score -= 8;
   return score;
 }
 
@@ -186,11 +191,16 @@ function scoreCandle(flags) {
   return -4;
 }
 
-function scoreLiquidity(token, flags) {
+function scoreLiquidity(token, flags, baseline) {
   let score = 0;
   const liquidity = Number(token.liquidityUsd || 0);
-  if (token.phase === 'migrated' && liquidity < 5000) score -= 16;
-  if (token.phase === 'migrated' && liquidity >= 35000) score += 7;
+
+  // Liquidity threshold sekarang relatif terhadap baseline
+  const minLiquidity = baseline.liquidityUsd.p50 * 0.3; // 30% dari median
+  const goodLiquidity = baseline.liquidityUsd.p75; // p75
+
+  if (token.phase === 'migrated' && liquidity < minLiquidity) score -= 16;
+  if (token.phase === 'migrated' && liquidity >= goodLiquidity) score += 7;
   if (flags.lpBurned === true) score += 7;
   return score;
 }
@@ -240,7 +250,7 @@ function computeFeeHealth(flags) {
   return expectedFee > 0 ? clamp(Math.round((feeCollected / expectedFee) * 100), 0, 100) : null;
 }
 
-function computeVolumeIntegrity(flags, feeHealth) {
+function computeVolumeIntegrity(flags, feeHealth, baseline) {
   if (feeHealth != null) return feeHealth;
 
   let score = 66;
@@ -250,12 +260,17 @@ function computeVolumeIntegrity(flags, feeHealth) {
   const sells = Number(flags.sells5m || 0);
   const total = buys + sells;
 
-  if (ratio > 8) score -= 32;
-  else if (ratio > 4) score -= 20;
-  else if (ratio > 2) score -= 9;
+  // Volume/liquidity ratio threshold sekarang relatif
+  const highRatio = baseline.volumeLiquidityRatio.p75 * 2;
+  const medRatio = baseline.volumeLiquidityRatio.p75 * 1.2;
+  const lowRatio = baseline.volumeLiquidityRatio.p60;
+
+  if (ratio > highRatio) score -= 32;
+  else if (ratio > medRatio) score -= 20;
+  else if (ratio > lowRatio) score -= 9;
   else if (ratio > 0.2) score += 7;
 
-  if (txns5m > 120 && ratio > 2) score -= 11;
+  if (txns5m > 120 && ratio > lowRatio) score -= 11;
   if (total > 0) {
     const imbalance = Math.abs(buys - sells) / total;
     if (imbalance > 0.78 && txns5m > 40) score -= 12;

@@ -86,6 +86,11 @@ export default function SignalCard({ signal, trade, onClick }) {
         <strong className={livePnl == null ? 'text-muted' : livePnl >= 0 ? 'text-green' : 'text-red'}>
           {livePnl == null ? '—' : `${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}%`}
         </strong>
+        {trade && trade.positionRemaining != null && trade.positionRemaining < 1.0 && (
+          <small style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
+            Posisi: {(trade.positionRemaining * 100).toFixed(0)}%
+          </small>
+        )}
       </div>
 
       <div className="sc-levels">

@@ -1,4 +1,6 @@
-import { Trophy, RotateCcw } from 'lucide-react';
+import { Trophy, RotateCcw, History, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useState } from 'react';
+import { formatUsd } from '../data/autoTrader';
 
 function StatBox({ label, value, tone, sub }) {
   const cls = tone === 'up' ? 'text-green' : tone === 'down' ? 'text-red' : tone === 'cyan' ? 'text-cyan' : '';
@@ -51,8 +53,38 @@ function EquityCurve({ trades }) {
   );
 }
 
-export default function PerformancePanel({ stats, trades = [], onReset }) {
+export default function PerformancePanel({ stats, trades = [], signalHistory = [], onReset }) {
   const fmt = (n, plus = false) => `${plus && n > 0 ? '+' : ''}${(n || 0).toFixed(1)}%`;
+  const [historyPage, setHistoryPage] = useState(0);
+  const ITEMS_PER_PAGE = 20;
+
+  const totalPages = Math.ceil(signalHistory.length / ITEMS_PER_PAGE);
+  const paginatedHistory = signalHistory.slice(
+    historyPage * ITEMS_PER_PAGE,
+    (historyPage + 1) * ITEMS_PER_PAGE
+  );
+
+  const gradeColor = (grade) => {
+    if (grade === 'A+') return 'var(--green)';
+    if (grade === 'A') return 'var(--cyan)';
+    if (grade === 'B') return 'var(--amber)';
+    return 'var(--muted)';
+  };
+
+  const formatTime = (timestamp) => {
+    if (!timestamp) return '-';
+    const date = new Date(timestamp);
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    if (days < 7) return `${days}d ago`;
+    return date.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+  };
 
   return (
     <div className="panel">
@@ -92,6 +124,100 @@ export default function PerformancePanel({ stats, trades = [], onReset }) {
             menandakan strategi ini menguntungkan dalam simulasi. Mode backtest, bukan eksekusi nyata.
           </p>
         </>
+      )}
+
+      {/* Riwayat Sinyal */}
+      {signalHistory.length > 0 && (
+        <div style={{ marginTop: 24, borderTop: '1px solid var(--line)', paddingTop: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+            <h4 style={{ display: 'flex', alignItems: 'center', gap: 8, margin: 0, fontSize: 15, color: 'var(--soft)' }}>
+              <History size={16} style={{ color: 'var(--cyan)' }} />
+              Riwayat Sinyal ({signalHistory.length})
+            </h4>
+            {totalPages > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setHistoryPage(p => Math.max(0, p - 1))}
+                  disabled={historyPage === 0}
+                  style={{ opacity: historyPage === 0 ? 0.4 : 1 }}
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  {historyPage + 1} / {totalPages}
+                </span>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setHistoryPage(p => Math.min(totalPages - 1, p + 1))}
+                  disabled={historyPage >= totalPages - 1}
+                  style={{ opacity: historyPage >= totalPages - 1 ? 0.4 : 1 }}
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--line)', color: 'var(--muted)' }}>
+                  <th style={{ textAlign: 'left', padding: '8px 12px', fontWeight: 600 }}>Token</th>
+                  <th style={{ textAlign: 'center', padding: '8px 12px', fontWeight: 600 }}>Grade</th>
+                  <th style={{ textAlign: 'right', padding: '8px 12px', fontWeight: 600 }}>Score</th>
+                  <th style={{ textAlign: 'right', padding: '8px 12px', fontWeight: 600 }}>Confidence</th>
+                  <th style={{ textAlign: 'right', padding: '8px 12px', fontWeight: 600 }}>Entry</th>
+                  <th style={{ textAlign: 'right', padding: '8px 12px', fontWeight: 600 }}>Liquidity</th>
+                  <th style={{ textAlign: 'right', padding: '8px 12px', fontWeight: 600 }}>Waktu</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginatedHistory.map((signal, i) => (
+                  <tr key={`${signal.ca}-${i}`} style={{ borderBottom: '1px solid var(--line)' }}>
+                    <td style={{ padding: '10px 12px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <strong style={{ fontSize: 13 }}>${signal.ticker}</strong>
+                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{signal.name}</span>
+                      </div>
+                    </td>
+                    <td style={{ textAlign: 'center', padding: '10px 12px' }}>
+                      <span style={{
+                        display: 'inline-block',
+                        padding: '2px 8px',
+                        borderRadius: 4,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: gradeColor(signal.grade),
+                        background: `${gradeColor(signal.grade)}22`,
+                        border: `1px solid ${gradeColor(signal.grade)}44`
+                      }}>
+                        {signal.grade}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: 'right', padding: '10px 12px', color: 'var(--soft)' }}>
+                      {signal.score || '-'}
+                    </td>
+                    <td style={{ textAlign: 'right', padding: '10px 12px', color: 'var(--soft)' }}>
+                      {signal.confidence || '-'}%
+                    </td>
+                    <td style={{ textAlign: 'right', padding: '10px 12px', color: 'var(--soft)' }}>
+                      {signal.entry ? formatUsd(signal.entry) : '-'}
+                    </td>
+                    <td style={{ textAlign: 'right', padding: '10px 12px', color: 'var(--soft)' }}>
+                      {formatUsd(signal.liquidityUsd)}
+                    </td>
+                    <td style={{ textAlign: 'right', padding: '10px 12px', fontSize: 11, color: 'var(--muted)' }}>
+                      {formatTime(signal.firstSeenAt)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   );

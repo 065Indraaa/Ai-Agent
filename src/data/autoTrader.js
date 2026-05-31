@@ -1,12 +1,16 @@
 import { analyzeToken } from './apeEngine';
 import { analyzeRug } from './rugDetector';
 import { analyzeRunner } from './runnerDetector';
-import { pushSnapshot } from './snapshotStore';
+import { pushSnapshot, getPeak } from './snapshotStore';
 import { buildSignalExplain } from './signalNarrative';
 import { fetchDiscoveryFeed, fetchTokenMarketSnapshots, fetchTokenSnapshot } from './liveProviders';
+import { computeExitActions, applyExitActions } from './exitEngine';
+import { buildMetaContext, analyzeNarrative } from './narrativeDetector';
+import { buildRegimeBaseline, setCachedBaseline, getCachedBaseline } from './marketRegime';
 
-const TRADES_KEY = 'ma_backtest';
-const SIGNALS_KEY = 'ma_signals';
+const TRADES_KEY = 'ma_backtest_v2'; // v2 untuk reset data lama
+const SIGNALS_KEY = 'ma_signals_v2'; // v2 untuk reset data lama
+const SIGNAL_HISTORY_KEY = 'ma_signal_history_v2'; // riwayat semua sinyal yang pernah muncul
 
 /* Grade yang ditampilkan di feed (C disembunyikan). */
 const FEED_GRADES = new Set(['A+', 'A', 'B']);
@@ -35,6 +39,33 @@ function loadSignals() {
 function saveSignals(list) {
   localStorage.setItem(SIGNALS_KEY, JSON.stringify(list));
 }
+function loadSignalHistory() {
+  try {
+    const raw = localStorage.getItem(SIGNAL_HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function saveSignalHistory(list) {
+  localStorage.setItem(SIGNAL_HISTORY_KEY, JSON.stringify(list));
+}
+function addToSignalHistory(signal) {
+  const history = loadSignalHistory();
+  // Cek apakah signal ini sudah ada di history (by CA + timestamp dalam 1 menit)
+  const exists = history.some(s =>
+    s.ca === signal.ca &&
+    Math.abs((s.firstSeenAt || 0) - Date.now()) < 60000
+  );
+  if (!exists) {
+    history.unshift({
+      ...signal,
+      firstSeenAt: Date.now(),
+      lastSeenAt: Date.now()
+    });
+    // Keep max 500 signals di history
+    if (history.length > 500) history.pop();
+    saveSignalHistory(history);
+  }
+}
 
 export function formatUsd(value) {
   const num = Number(value || 0);
@@ -55,7 +86,7 @@ export function shortAddr(a) {
 
 /* ─── Signal Grading ─────────────────────────────────────────────────────── */
 /* CATATAN: logika analisa/skoring di bawah TIDAK diubah dari versi sebelumnya. */
-function gradeSignal(token, report, rug, runner) {
+function gradeSignal(token, report, rug, runner, narrative = null) {
   const price = Number(token.priceUsd || 0);
   const liquidity = Number(token.liquidityUsd || 0);
   const flags = token.flags || {};
@@ -91,6 +122,11 @@ function gradeSignal(token, report, rug, runner) {
     noBlacklist: flags.madeOnSolBlacklisted !== true,
   };
 
+  // Narrative modifier: adjust score threshold berdasarkan narrative
+  const narrativeBonus = narrative ? narrative.narrativeScore : 0;
+  const adjustedScoreHigh = checks.scoreHigh || (report.score + narrativeBonus >= 75);
+  const adjustedScoreOk = checks.scoreOk || (report.score + narrativeBonus >= 60);
+
   const passed = Object.values(checks).filter(Boolean).length;
 
   let grade = 'C';
@@ -103,26 +139,34 @@ function gradeSignal(token, report, rug, runner) {
     side = 'SELL';
     confidence = 96;
     reasons.push('Token terdeteksi bermasalah kritis — hindari entry');
-  } else if (checks.scoreHigh && checks.noRug && checks.notDead && checks.runnerScoreHigh && checks.confidence && checks.liquidityOk && checks.momentum && checks.buyPressure && checks.volumeSehat && checks.noFreeze && checks.noOpenMint && checks.concentrationOk) {
+  } else if (adjustedScoreHigh && checks.noRug && checks.notDead && checks.runnerScoreHigh && checks.confidence && checks.liquidityOk && checks.momentum && checks.buyPressure && checks.volumeSehat && checks.noFreeze && checks.noOpenMint && checks.concentrationOk) {
     grade = 'A+';
     side = 'BUY';
-    confidence = Math.min(98, Math.round(report.score + 12));
+    confidence = Math.min(98, Math.round(report.score + narrativeBonus + 12));
     reasons.push('Setup kuat: momentum, struktur, dan risiko paling seimbang');
-  } else if (checks.scoreOk && checks.noRug && checks.notDead && checks.runnerScoreOk && checks.confidence && checks.liquidityOk && checks.momentum && checks.buyPressure && checks.noFreeze && checks.noOpenMint) {
+    if (narrative && narrative.isHotMeta) reasons.push('Tema sedang panas');
+  } else if (adjustedScoreOk && checks.noRug && checks.notDead && checks.runnerScoreOk && checks.confidence && checks.liquidityOk && checks.momentum && checks.buyPressure && checks.noFreeze && checks.noOpenMint) {
     grade = 'A';
     side = 'BUY';
-    confidence = Math.min(92, Math.round(report.score + 6));
+    confidence = Math.min(92, Math.round(report.score + narrativeBonus + 6));
     reasons.push('Setup bagus: risiko masih terukur dan layak dipantau');
   } else if (checks.scoreMin && checks.noRug && checks.notDead && checks.confidenceMin && checks.liquidityOk) {
     grade = 'B';
     side = 'HOLD';
-    confidence = Math.round(report.score * 0.9);
+    confidence = Math.round((report.score + narrativeBonus) * 0.9);
     reasons.push('Kondisi menarik tapi belum memenuhi standar entry prioritas');
   } else {
     grade = 'C';
     side = 'SELL';
     confidence = Math.round(Math.max(40, 80 - passed * 2));
     reasons.push('Kondisi tidak memenuhi kriteria seleksi — hindari entry');
+  }
+
+  // Downgrade jika narrative sangat negatif (late copycat di tema saturated)
+  if (narrative && narrative.isSaturated && !narrative.isFirstMover && narrativeBonus < -8) {
+    if (grade === 'A+') grade = 'A';
+    else if (grade === 'A') grade = 'B';
+    reasons.push('Late copycat di tema saturated — risiko exit liquidity tinggi');
   }
 
   return { grade, side, confidence, reasons, checks, passed };
@@ -165,7 +209,8 @@ function deriveSlTp({ grade, confidence, token, runner }) {
   rr = clamp(rr, 1.4, 4.0);
 
   let tpPct = slPct * rr + volatility * 0.4;
-  tpPct = clamp(tpPct, 12, 90);
+  // HAPUS CAP +90% — exit engine sekarang pakai partial TP bertingkat + trailing
+  tpPct = clamp(tpPct, 12, 200);
 
   return { slPct: round1(slPct), tpPct: round1(tpPct), rr: round1(rr), volatility: round1(volatility) };
 }
@@ -174,9 +219,9 @@ function chartUrlFor(token) {
   return token.url || token.pairUrl || `https://dexscreener.com/solana/${token.ca}`;
 }
 
-function buildSignal(token, report, rug, runner) {
+function buildSignal(token, report, rug, runner, narrative = null) {
   const price = Number(token.priceUsd || 0);
-  const { grade, side, confidence, reasons } = gradeSignal(token, report, rug, runner);
+  const { grade, side, confidence, reasons } = gradeSignal(token, report, rug, runner, narrative);
 
   const entry = price > 0 ? price : null;
   const { slPct, tpPct, rr } = deriveSlTp({ grade, confidence, token, runner });
@@ -187,7 +232,7 @@ function buildSignal(token, report, rug, runner) {
     tp = entry * (1 + tpPct / 100);
   }
 
-  const explain = buildSignalExplain({ token, report, rug, runner, grade, side, reasons, entry, sl, tp, tpPct, slPct, rr });
+  const explain = buildSignalExplain({ token, report, rug, runner, grade, side, reasons, entry, sl, tp, tpPct, slPct, rr, narrative });
 
   return {
     id: token.ca,
@@ -215,26 +260,29 @@ function buildSignal(token, report, rug, runner) {
     url: chartUrlFor(token),
     tracked: TRACKED_GRADES.has(grade),
     explain,
+    narrative, // tambahkan narrative ke signal object
     updatedAt: Date.now()
   };
 }
 
-function computeSignal(token) {
+function computeSignal(token, metaContext = null, regimeBaseline = null) {
   pushSnapshot(token.ca, token);
-  const report = analyzeToken(token);
+  const report = analyzeToken(token, regimeBaseline);
   const rug = analyzeRug(token);
-  const runner = analyzeRunner(token);
-  return buildSignal(token, report, rug, runner);
+  const runner = analyzeRunner(token, regimeBaseline);
+  const narrative = metaContext ? analyzeNarrative(token, metaContext) : null;
+  return buildSignal(token, report, rug, runner, narrative);
 }
 
 function reevaluateSignal(signal, liveToken) {
   pushSnapshot(liveToken.ca, liveToken);
-  const report = analyzeToken(liveToken);
+  const regimeBaseline = getCachedBaseline(); // pakai cached baseline dari scan terakhir
+  const report = analyzeToken(liveToken, regimeBaseline);
   const rug = analyzeRug(liveToken);
-  const runner = analyzeRunner(liveToken);
+  const runner = analyzeRunner(liveToken, regimeBaseline);
 
   const price = Number(liveToken.priceUsd || signal.priceUsd);
-  const { grade, side, confidence, reasons } = gradeSignal(liveToken, report, rug, runner);
+  const { grade, side, confidence, reasons } = gradeSignal(liveToken, report, rug, runner, signal.narrative);
 
   // Entry dikunci di harga pertama sinyal terbentuk (biar PnL berjalan konsisten).
   const entry = signal.entry || (price > 0 ? price : null);
@@ -247,7 +295,7 @@ function reevaluateSignal(signal, liveToken) {
   }
 
   const explain = buildSignalExplain({
-    token: liveToken, report, rug, runner, grade, side, reasons, entry, sl, tp, tpPct, slPct, rr
+    token: liveToken, report, rug, runner, grade, side, reasons, entry, sl, tp, tpPct, slPct, rr, narrative: signal.narrative
   });
 
   return {
@@ -328,9 +376,15 @@ export async function refreshSignals({ autoTrack = true } = {}) {
   try {
     const feed = await fetchDiscoveryFeed();
     const tokens = feed.tokens || [];
+
+    // Build meta context dan regime baseline sekali per scan dari seluruh populasi feed
+    const metaContext = buildMetaContext(tokens);
+    const regimeBaseline = buildRegimeBaseline(tokens);
+    setCachedBaseline(regimeBaseline); // cache untuk reevaluateSignal
+
     const computed = tokens
       .slice(0, 30)
-      .map(computeSignal)
+      .map(token => computeSignal(token, metaContext, regimeBaseline))
       .filter((s) => FEED_GRADES.has(s.grade));
 
     const primary = computed.filter((s) => s.grade === 'A+' || s.grade === 'A');
@@ -340,6 +394,9 @@ export async function refreshSignals({ autoTrack = true } = {}) {
       .slice(0, MAX_B_SIGNALS);
 
     const signals = [...primary, ...bestB].sort(sortSignals);
+
+    // Tambahkan ke signal history
+    signals.forEach(s => addToSignalHistory(s));
 
     saveSignals(signals);
     if (autoTrack) {
@@ -388,17 +445,34 @@ export function applyPriceUpdates(signals, trades, liveTokens) {
       return { ...t, signal: snapshot };
     }
 
-    const pnlPct = ((currentPrice - t.entry) / t.entry) * 100;
-    if (currentPrice <= t.sl) {
+    // Update peak price untuk trailing stop
+    const peakPrice = Math.max(t.peakPrice || t.entry, currentPrice);
+
+    // Compute exit actions dari exit engine
+    const { actions, newStop, newStatus, reason } = computeExitActions(t, currentPrice, live);
+
+    if (actions.length === 0) {
+      // Tidak ada action, update PnL saja
+      const positionRemaining = t.positionRemaining ?? 1.0;
+      const realizedPnl = t.realizedPnl || 0;
+      const unrealizedPnl = ((currentPrice - t.entry) / t.entry) * 100 * positionRemaining;
+      const pnlPct = realizedPnl + unrealizedPnl;
+
       tradesChanged = true;
-      return { ...t, status: 'LOSS', closedAt: Date.now(), closePrice: currentPrice, pnlPct, signal: snapshot };
+      return { ...t, pnlPct, lastPrice: currentPrice, peakPrice, signal: snapshot };
     }
-    if (currentPrice >= t.tp) {
-      tradesChanged = true;
-      return { ...t, status: 'WIN', closedAt: Date.now(), closePrice: currentPrice, pnlPct, signal: snapshot };
-    }
+
+    // Apply exit actions
     tradesChanged = true;
-    return { ...t, pnlPct, lastPrice: currentPrice, signal: snapshot };
+    const updatedTrade = applyExitActions(t, actions, currentPrice);
+    updatedTrade.status = newStatus;
+    updatedTrade.sl = newStop;
+    updatedTrade.lastPrice = currentPrice;
+    updatedTrade.peakPrice = peakPrice;
+    updatedTrade.signal = snapshot;
+    updatedTrade.exitReason = reason;
+
+    return updatedTrade;
   });
 
   if (tradesChanged) saveTrades(updatedTrades);
@@ -449,6 +523,14 @@ export function openBacktestTrade(signal) {
     closePrice: null,
     lastPrice: signal.priceUsd || signal.entry,
     pnlPct: 0,
+    // Field baru untuk exit engine multi-X
+    positionRemaining: 1.0,
+    realizedPnl: 0,
+    peakPrice: signal.entry,
+    slMovedToBreakeven: false,
+    tiers: null, // akan di-generate oleh exitEngine saat pertama kali compute
+    exitEvents: [],
+    exitReason: null,
     signal: { ...signal }
   };
   trades.unshift(trade);
@@ -492,6 +574,11 @@ export function getBacktestStats() {
 
 export function resetBacktest() {
   saveTrades([]);
+  saveSignalHistory([]);
+}
+
+export function getSignalHistory() {
+  return loadSignalHistory();
 }
 
 export function scanDeep(ca) {

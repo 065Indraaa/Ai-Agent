@@ -11,6 +11,7 @@ import {
   getBacktestTrades,
   getBacktestStats,
   resetBacktest,
+  getSignalHistory,
 } from '../data/autoTrader';
 import SignalCard from '../components/SignalCard.jsx';
 import SignalDetail from '../components/SignalDetail.jsx';
@@ -29,6 +30,7 @@ export default function Dashboard({ onLogout }) {
   const [tab, setTab] = useState('signals');
   const [signals, setSignals] = useState(() => getCachedSignals());
   const [trades, setTrades] = useState(() => getBacktestTrades());
+  const [signalHistory, setSignalHistory] = useState(() => getSignalHistory());
   const [scanning, setScanning] = useState(false);
   const [agentOn, setAgentOn] = useState(() => localStorage.getItem('ma_agent_on') !== 'false');
   const [selectedCa, setSelectedCa] = useState(null);
@@ -83,6 +85,7 @@ export default function Dashboard({ onLogout }) {
     const s = await refreshSignals({ autoTrack: agentOnRef.current });
     setSignals(s);
     setTrades(getBacktestTrades());
+    setSignalHistory(getSignalHistory());
     setScanning(false);
   };
 
@@ -139,7 +142,8 @@ export default function Dashboard({ onLogout }) {
   const handleReset = () => {
     resetBacktest();
     setTrades(getBacktestTrades());
-    showToast('Data backtest telah dikosongkan');
+    setSignalHistory(getSignalHistory());
+    showToast('Data backtest dan riwayat sinyal telah dikosongkan');
   };
 
   const selectedSignal = selectedCa
@@ -173,7 +177,7 @@ export default function Dashboard({ onLogout }) {
         />
       )}
       {tab === 'performance' && (
-        <PerformancePanel stats={stats} trades={trades} onReset={handleReset} />
+        <PerformancePanel stats={stats} trades={trades} signalHistory={signalHistory} onReset={handleReset} />
       )}
       {tab === 'agent' && (
         <AgentTab agentOn={agentOn} onToggle={toggleAgent} onReset={handleReset} />
